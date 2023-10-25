@@ -1,4 +1,4 @@
-# XAI_MultiSpan_MachineReadingComprehension
+# XAI_EvidenceExtraction
 
 
 # Dependencies
