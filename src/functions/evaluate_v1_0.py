@@ -101,7 +101,7 @@ def eval_during_train(args, global_step):
     expected_version = 'KorQuAD_v1.0'
 
     dataset_file = os.path.join(args.data_dir, args.predict_file)
-    prediction_file = os.path.join(args.save_dir, 'predictions_{}.json'.format(global_step))
+    prediction_file = os.path.join(args.output_dir, 'predictions_{}.json'.format(global_step))
 
     with open(dataset_file) as dataset_f:
         dataset_json = json.load(dataset_f)
@@ -118,7 +118,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description='Evaluation for KorQuAD ' + expected_version)
     parser.add_argument('--dataset_file', default="../../data/hotpot_dev_distractor_v1.json")
-    parser.add_argument('--prediction_file',default="../../upper_bound_v2/predictions_2000.json")
+    parser.add_argument('--prediction_file',default="../../proposed_model_1019/predictions_14000.json")
 
     args = parser.parse_args()
     with open(args.dataset_file) as dataset_file:

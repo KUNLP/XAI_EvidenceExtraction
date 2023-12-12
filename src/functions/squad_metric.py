@@ -371,21 +371,21 @@ def restore_prediction_2(results, features, n_best_size, tokenizer, max_answer_l
     _PrelimPrediction = collections.namedtuple(  # pylint: disable=invalid-name
         "PrelimPrediction", ["tokens", "start_index", "end_index", "score"]
     )
-    preds = []
-    scores = []
+
+    prelim_predictions = []
     for idx, result in enumerate(results):
-        prelim_predictions = []
+
         start_indexes = _get_best_indexes(result.start_logits, n_best_size)
         end_indexes = _get_best_indexes(result.end_logits, n_best_size)
-        feature = features[idx]
-        sep_position = feature[0].index('[SEP]')+1
+        feature = features[idx].tokens
+        sep_position = feature.index('[SEP]')+1
         for start_index in start_indexes:
             for end_index in end_indexes:
                 if start_index < sep_position or end_index < sep_position:
                     continue
-                if start_index >= len(feature[0]):
+                if start_index >= len(feature):
                     continue
-                if end_index >= len(feature[0]):
+                if end_index >= len(feature):
                     continue
                 if end_index < start_index:
                     continue
@@ -394,27 +394,27 @@ def restore_prediction_2(results, features, n_best_size, tokenizer, max_answer_l
                     continue
                 prelim_predictions.append(
                     _PrelimPrediction(
-                        tokens = feature[0],
+                        tokens = feature,
                         start_index=start_index,
                         end_index=end_index,
                         score=result.start_logits[start_index]+result.end_logits[end_index]
                     )
                 )
-        prelim_predictions = sorted(prelim_predictions, key=lambda x: (x.score), reverse=True)
-        if prelim_predictions:
-            pred = prelim_predictions[0]
-            scores.append(pred.score)
-            tok_tokens = pred.tokens[pred.start_index: (pred.end_index + 1)]
-            tok_text = tokenizer.convert_tokens_to_string(tok_tokens)
-            tok_text = tok_text.strip()
-            tok_text = " ".join(tok_text.split())
-        else:
-            tok_text =  ''
-            scores.append([])
-        preds.append(tok_text)
+    prelim_predictions = sorted(prelim_predictions, key=lambda x: (x.score), reverse=True)
+    if prelim_predictions:
+        pred = prelim_predictions[0]
+        score = pred.score
+        tok_tokens = pred.tokens[pred.start_index: (pred.end_index + 1)]
+        tok_text = tokenizer.convert_tokens_to_string(tok_tokens)
+        tok_text = tok_text.strip()
+        tok_text = " ".join(tok_text.split())
+    else:
+        tok_text =  ''
+        score = 0
+    pred = tok_text
 
 
-    return preds, scores
+    return pred, score
 def restore_prediction(example, features, results, n_best_size, do_lower_case, verbose_logging, tokenizer):
     prelim_predictions = []
     _PrelimPrediction = collections.namedtuple(  # pylint: disable=invalid-name
@@ -479,21 +479,67 @@ def restore_prediction(example, features, results, n_best_size, do_lower_case, v
     feature = features[pred.feature_index]
     if pred.start_index > 0:  # this is a non-null prediction
         tok_tokens = feature.tokens[pred.start_index: (pred.end_index + 1)]
-        orig_doc_start = feature.token_to_orig_map[pred.start_index]
-        orig_doc_end = feature.token_to_orig_map[pred.end_index]
-        orig_tokens = example[feature.example_id].doc_tokens[orig_doc_start: (orig_doc_end + 1)]
-
         tok_text = tokenizer.convert_tokens_to_string(tok_tokens)
         tok_text = tok_text.strip()
         tok_text = " ".join(tok_text.split())
-        if pred.start_logit + pred.end_logit < null_end_logit+null_start_logit:
-            return ''
-        orig_text = " ".join(orig_tokens)
-        final_text = get_final_text(tok_text, orig_text, do_lower_case, verbose_logging)
-        return final_text
+
+        return tok_text
+    else:
+        return ''
+def restore_prediction2(tokens, results, n_best_size, tokenizer):
+    prelim_predictions = []
+    _PrelimPrediction = collections.namedtuple(  # pylint: disable=invalid-name
+        "PrelimPrediction", ["feature_index", "start_index", "end_index", "start_logit", "end_logit"]
+    )
+
+    for result in results:
+        # 10개 문서에 종속되는 다수의 feature
+
+        start_indexes = _get_best_indexes(result.start_logits, n_best_size)
+        end_indexes = _get_best_indexes(result.end_logits, n_best_size)
+
+        for start_index in start_indexes:
+            for end_index in end_indexes:
+                # We could hypothetically create invalid predictions, e.g., predict
+                # that the start of the span is in the question. We throw out all
+                # invalid predictions.
+                if start_index >= len(tokens):
+                    continue
+                if end_index >= len(tokens):
+                    continue
+                if '[SEP]' in tokens[start_index:end_index+1] or '[CLS]' in tokens[start_index:end_index+1]:
+                    continue
+                if end_index < start_index:
+                    continue
+                if end_index - start_index > 30:
+                    continue
+                prelim_predictions.append(
+                    _PrelimPrediction(
+                        feature_index=0,
+                        start_index=start_index,
+                        end_index=end_index,
+                        start_logit=result.start_logits[start_index],
+                        end_logit=result.end_logits[end_index],
+                    )
+                )
+
+    prelim_predictions = sorted(prelim_predictions, key=lambda x: (x.start_logit + x.end_logit), reverse=True)
+
+
+    if prelim_predictions:
+        pred  = prelim_predictions[0]
     else:
         return ''
 
+    if pred.start_index > 0:  # this is a non-null prediction
+        tok_tokens = tokens[pred.start_index: (pred.end_index + 1)]
+        tok_text = tokenizer.convert_tokens_to_string(tok_tokens)
+        tok_text = tok_text.strip()
+        tok_text = " ".join(tok_text.split())
+
+        return tok_text
+    else:
+        return ''
 def compute_predictions_logits(
     all_examples,
     all_features,
@@ -585,7 +631,8 @@ def compute_predictions_logits(
                             end_index=end_index,
                             start_logit=result.start_logits[start_index],
                             end_logit=result.end_logits[end_index],
-                            evidence=result.evidence
+                            evidence=result.evidence,
+
                         )
                     )
 
@@ -640,7 +687,10 @@ def compute_predictions_logits(
                 if sent_ids in cur_feature.cur_sent_to_orig_sent.keys():
                     evidences.append(cur_example.doc_sentences[cur_feature.cur_sent_to_orig_sent[sent_ids]])
 
-
+            # if pred.qt == 0:
+            #     final_text = 'yes'
+            # elif pred.qt == 1:
+            #     final_text = 'no'
             nbest.append(_NbestPrediction(text=final_text, start_logit=pred.start_logit, end_logit=pred.end_logit, evidence=evidences))
         # if we didn't include the empty option in the n-best, include it
         if version_2_with_negative:

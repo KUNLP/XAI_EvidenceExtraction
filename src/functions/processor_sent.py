@@ -102,18 +102,18 @@ def squad_convert_example_to_features(examples, max_seq_length, doc_stride, max_
         orig_to_tok_index = []
         all_doc_tokens = []
         tok_to_sent_index = []
-        doc_sent_tokens = []
-
-        for sentence in example.doc_sentences:
-            doc_sent_tokens.append([])
-            for (i, token) in enumerate(sentence.split(' ')):
-                sub_tokens = tokenizer.tokenize(token)
-                # sub tokens?? => 어절을 wordpiece
-                for sub_token in sub_tokens:
-                    doc_sent_tokens[-1].append(sub_token)
-        if is_training:
-            example.doc_sentences = None
-        example.doc_sent_tokens = doc_sent_tokens
+        # doc_sent_tokens = []
+        #
+        # for sentence in example.doc_sentences:
+        #     doc_sent_tokens.append([])
+        #     for (i, token) in enumerate(sentence.split(' ')):
+        #         sub_tokens = tokenizer.tokenize(token)
+        #         # sub tokens?? => 어절을 wordpiece
+        #         for sub_token in sub_tokens:
+        #             doc_sent_tokens[-1].append(sub_token)
+        # if is_training:
+        #     example.doc_sentences = None
+        #     example.doc_sent_tokens = doc_sent_tokens
 
         refine_examples.append(example)
         for (i, token) in enumerate(example.doc_tokens):
@@ -186,19 +186,21 @@ def squad_convert_example_to_features(examples, max_seq_length, doc_stride, max_
             tokens = tokenizer.convert_ids_to_tokens(non_padded_ids)
 
             token_to_orig_map = {}
-            token_to_orig_sent_map = {}
             cur_sent_to_orig_sent_map = {}
             sent_mask = [0]*(len(truncated_query) + sequence_added_tokens)
             sent_offset = tok_to_sent_index[len(spans) * doc_stride]
-            sent_label = [0 for e in range(40)]
+
+            cur_sent_range = [[] for _ in range(40)]
+            cur_sent_range[0] = [e for e in range(len(sent_mask))]
             for i in range(paragraph_len):
                 cur_sent_num = tok_to_sent_index[len(spans) * doc_stride + i] - sent_offset + 1
                 orig_sent_num = tok_to_sent_index[len(spans) * doc_stride + i]
-                sent_label[cur_sent_num] = example.support_fact[orig_sent_num]
+
                 index = len(truncated_query) + sequence_added_tokens + i if tokenizer.padding_side == "right" else i
                 token_to_orig_map[index] = tok_to_orig_index[len(spans) * doc_stride + i]
 
                 sent_mask.append(cur_sent_num)
+                cur_sent_range[cur_sent_num].append(len(sent_mask)-1)
                 cur_sent_to_orig_sent_map[cur_sent_num] = orig_sent_num
             encoded_dict["paragraph_len"] = paragraph_len
             encoded_dict["tokens"] = tokens
@@ -207,11 +209,12 @@ def squad_convert_example_to_features(examples, max_seq_length, doc_stride, max_
             encoded_dict["token_is_max_context"] = {}
             encoded_dict["start"] = len(spans) * doc_stride
             encoded_dict["length"] = paragraph_len
-            encoded_dict["sent_label"] = sent_label
+
             encoded_dict["sent_mask"] = sent_mask + [0]*(max_seq_length-len(sent_mask))
             encoded_dict["cur_sent_to_orig_sent"] = cur_sent_to_orig_sent_map
             encoded_dict["example_id"] = ex_id
             encoded_dict["truncated_query"] = truncated_query
+            encoded_dict["cur_sent_range"] = cur_sent_range
             spans.append(encoded_dict)
 
             if "overflowing_tokens" not in encoded_dict:
@@ -232,24 +235,14 @@ def squad_convert_example_to_features(examples, max_seq_length, doc_stride, max_
             # Identify the position of the CLS token
             cls_index = span["input_ids"].index(tokenizer.cls_token_id)
 
-            # p_mask: mask with 1 for token than cannot be in the answer (0 for token which can be in an answer)
-            # Original TF implem also keep the classification token (set to 0)
-            p_mask = np.ones_like(span["token_type_ids"])
-            if tokenizer.padding_side == "right":
-                p_mask[len(truncated_query) + sequence_added_tokens:] = 0
-            else:
-                p_mask[-len(span["tokens"]): -(len(truncated_query) + sequence_added_tokens)] = 0
+
 
             pad_token_indices = np.where(span["input_ids"] == tokenizer.pad_token_id)
             special_token_indices = np.asarray(
                 tokenizer.get_special_tokens_mask(span["input_ids"], already_has_special_tokens=True)
             ).nonzero()
 
-            p_mask[pad_token_indices] = 1
-            p_mask[special_token_indices] = 1
 
-            # Set the cls index to 0: the CLS index can be used for impossible answers
-            p_mask[cls_index] = 0
 
             span_is_impossible = example.is_impossible
             start_position = 0
@@ -282,15 +275,15 @@ def squad_convert_example_to_features(examples, max_seq_length, doc_stride, max_
                     span["input_ids"],
                     span["attention_mask"],
                     span["token_type_ids"],
+                    span["cur_sent_range"],
                     cls_index,
-                    p_mask.tolist(),
                     example_index=0,
                     # Can not set unique_id and example_index here. They will be set after multiple processing.
                     unique_id=0,
                     paragraph_len=span["paragraph_len"],
                     token_is_max_context=span["token_is_max_context"],
                     tokens=span["tokens"],
-                    sent_label=encoded_dict["sent_label"],
+
                     token_to_orig_map=span["token_to_orig_map"],
                     start_position=start_position,
                     end_position=end_position,
@@ -299,7 +292,8 @@ def squad_convert_example_to_features(examples, max_seq_length, doc_stride, max_
                     is_impossible=span_is_impossible,
                     qas_id=example.qas_id,
                     example_id = encoded_dict["example_id"],
-                    truncated_query=span['truncated_query']
+                    truncated_query=span['truncated_query'],
+                    question_type=example.q_type
                 )
             )
     return refine_examples, features
@@ -396,6 +390,7 @@ def squad_convert_examples_to_features(
             new_feature.append(example_feature)
             unique_id += 1
         example_index += 1
+
         new_features.append(new_feature)
     features = new_features
     del new_features
@@ -557,6 +552,10 @@ class SquadProcessor(DataProcessor):
             question_text = entry["question"]
             level = entry["level"]
             question_type = entry["type"]
+            if 'question_type' in entry.keys():
+                q_type = entry['question_type']
+            else:
+                q_type = None
             data_examples = []
             support_facts = {e[0]:e[1] for e in entry["supporting_facts"]}
 
@@ -587,6 +586,7 @@ class SquadProcessor(DataProcessor):
                     qas_id=qas_id,
                     question_text=question_text,
                     context_text=context_text,
+                    q_type = q_type,
                     doc_sentences=doc_sentences,
                     support_fact=support_fact,
                     answer_text=answer_text,
@@ -601,7 +601,7 @@ class SquadProcessor(DataProcessor):
                 data_examples.append(example)
 
             examples.append(data_examples)
-            if len(examples) > 40000:
+            if len(examples) > 50000:
                 break
         return examples
 
@@ -637,6 +637,7 @@ class SquadExample(object):
             question_text,
             context_text,
             doc_sentences,
+            q_type,
             answer_text,
             support_fact,
             start_position_character,
@@ -648,8 +649,9 @@ class SquadExample(object):
             tokenizer=None
     ):
         self.qas_id = qas_id
+        self.q_type = q_type
         self.question_text = question_text
-        self.context_text = context_text
+
         self.level = level
         self.question_type = question_type
         self.answer_text = answer_text
@@ -663,28 +665,41 @@ class SquadExample(object):
 
         doc_tokens = []
         char_to_word_offset = []
-        prev_is_whitespace = True
 
-        # Split on whitespace so that different tokens may be attributed to their original position.
-        for c in self.context_text:
-            if _is_whitespace(c):
-                prev_is_whitespace = True
+        if q_type == 'yn':
+            if answer_text == 'yes':
+                self.q_type = 0
             else:
-                if prev_is_whitespace:
-                    doc_tokens.append(c)
+                self.q_type = 1
+        else:
+            self.q_type = 2
+        # Split on whitespace so that different tokens may be attributed to their original position.
+        prev_is_whitespace = True
+        for sent_num in range(len(doc_sentences)):
+
+            for c_idx, c in enumerate(doc_sentences[sent_num]):
+                if _is_whitespace(c):
+                    prev_is_whitespace = True
+                    if c_idx == 0:
+                        char_to_word_offset.append(len(doc_tokens))
+                    else:
+                        char_to_word_offset.append(len(doc_tokens)-1)
                 else:
-                    doc_tokens[-1] += c
-                prev_is_whitespace = False
-            char_to_word_offset.append(len(doc_tokens) - 1)
+                    if prev_is_whitespace:
+                        doc_tokens.append(c)
+                    else:
+                        doc_tokens[-1] += c
+                    prev_is_whitespace = False
+                    char_to_word_offset.append(len(doc_tokens) - 1)
 
         self.doc_tokens = doc_tokens
-        self.char_to_word_offset = char_to_word_offset
-        self.char_to_sent_offset = []
+        char_to_word_offset = char_to_word_offset
+        char_to_sent_offset = []
 
         for sent_id, sentence in enumerate(doc_sentences):
-            self.char_to_sent_offset += [sent_id] * len(sentence)
+            char_to_sent_offset += [sent_id] * len(sentence)
 
-        self.word_to_sent_offset = {self.char_to_word_offset[e]: self.char_to_sent_offset[e] for e in
+        self.word_to_sent_offset = {char_to_word_offset[e]: char_to_sent_offset[e] for e in
                                     range(len(char_to_word_offset))}
         # Start and end positions only has a value during evaluation.
         if start_position_character is not None and not is_impossible:
@@ -724,14 +739,15 @@ class SquadFeatures(object):
             input_ids,
             attention_mask,
             token_type_ids,
+            cur_sent_range,
             cls_index,
-            p_mask,
+
             example_index,
             unique_id,
             paragraph_len,
             token_is_max_context,
             tokens,
-            sent_label,
+
             token_to_orig_map,
             start_position,
             end_position,
@@ -740,16 +756,18 @@ class SquadFeatures(object):
             cur_sent_to_orig_sent,
             qas_id: str = None,
             example_id:int = 0,
-            truncated_query=''
+            truncated_query='',
+            question_type=None
     ):
         self.input_ids = input_ids
         self.truncated_query = truncated_query
         self.attention_mask = attention_mask
         self.token_type_ids = token_type_ids
         self.cls_index = cls_index
-        self.p_mask = p_mask
+        self.cur_sent_range = cur_sent_range
+
         self.sent_mask = sent_mask
-        self.sent_label = sent_label
+        self.question_type = question_type
         self.cur_sent_to_orig_sent = cur_sent_to_orig_sent
         self.example_index = example_index
         self.unique_id = unique_id
@@ -775,7 +793,7 @@ class SquadResult(object):
         end_logits: The logits corresponding to the end of the answer
     """
 
-    def __init__(self, unique_id, start_logits, end_logits, evidence=None, start_top_index=None, end_top_index=None, cls_logits=None):
+    def __init__(self, unique_id, start_logits, end_logits,  evidence=None, start_top_index=None, end_top_index=None, cls_logits=None):
         self.start_logits = start_logits
         self.end_logits = end_logits
         self.unique_id = unique_id
