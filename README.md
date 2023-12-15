@@ -4,7 +4,7 @@
 # Dependencies
 * python 3.7
 * PyTorch 1.6.0
-* Transformers 2.11.0
+* Transformers 2.11.
 
 # Data
 * HOTPOT QA
